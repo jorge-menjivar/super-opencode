@@ -55,6 +55,7 @@ import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useLeaderActive, u
 import { useTuiConfig } from "../../config"
 import { usePromptWorkspace } from "./workspace"
 import { usePromptMove } from "./move"
+import { DictateButton, DictatePreview, usePromptDictation } from "./dictate"
 import { readLocalAttachment } from "./local-attachment"
 import { useLocation } from "../../context/location"
 
@@ -166,6 +167,7 @@ export function Prompt(props: PromptProps) {
   const keymap = useOpencodeKeymap()
   const agentShortcut = useCommandShortcut("agent.cycle")
   const paletteShortcut = useCommandShortcut("command.palette.show")
+  const dictateShortcut = useCommandShortcut("prompt.dictate")
   const renderer = useRenderer()
   const exit = useExit()
   const dimensions = useTerminalDimensions()
@@ -209,6 +211,15 @@ export function Prompt(props: PromptProps) {
   const [auto, setAuto] = createSignal<AutocompleteRef>()
   const workspace = usePromptWorkspace(props.sessionID)
   const move = usePromptMove({ projectID: project.project, sessionID: () => props.sessionID })
+  const dictation = usePromptDictation({
+    insert: (text) => {
+      // Dictation appends to whatever is already typed, so separate it from a
+      // preceding word the way a space bar would.
+      const before = input.plainText.slice(0, input.cursorOffset)
+      input.insertText(before && !/\s$/.test(before) ? " " + text : text)
+      input.focus()
+    },
+  })
   const [cursorVersion, setCursorVersion] = createSignal(0)
   const currentProviderLabel = createMemo(() => local.model.parsed().provider)
   const hasRightContent = createMemo(() => Boolean(props.right))
@@ -572,6 +583,7 @@ export function Prompt(props: PromptProps) {
       "prompt.stash",
       "prompt.stash.pop",
       "prompt.stash.list",
+      "prompt.dictate",
       "prompt.skills",
       "session.interrupt",
       "workspace.set",
@@ -795,6 +807,38 @@ export function Prompt(props: PromptProps) {
 
   useBindings(() => ({
     commands: stashCommands(),
+  }))
+
+  const dictationCommands = createMemo(() =>
+    [
+      {
+        title: dictation.state === "recording" ? "Stop dictation" : "Start dictation",
+        name: "prompt.dictate",
+        category: "Prompt",
+        enabled: dictation.ready && !props.disabled,
+        run: () => {
+          dialog.clear()
+          dictation.toggle()
+        },
+      },
+      {
+        title: "Cancel dictation",
+        name: "prompt.dictate.cancel",
+        category: "Prompt",
+        enabled: dictation.active,
+        run: () => {
+          dialog.clear()
+          dictation.cancel()
+        },
+      },
+    ].map((entry) => ({
+      namespace: "palette",
+      ...entry,
+    })),
+  )
+
+  useBindings(() => ({
+    commands: dictationCommands(),
   }))
 
   useBindings(() => {
@@ -1441,6 +1485,9 @@ export function Prompt(props: PromptProps) {
               cursorStyle={tuiConfig.cursor}
               syntaxStyle={syntax()}
             />
+            <Show when={dictation.ready}>
+              <DictatePreview dictation={dictation} />
+            </Show>
             <box flexDirection="row" flexShrink={0} paddingTop={1} gap={1} justifyContent="space-between">
               <box flexDirection="row" gap={1}>
                 <Show when={local.agent.current()} fallback={<box height={1} />}>
@@ -1476,8 +1523,11 @@ export function Prompt(props: PromptProps) {
                   )}
                 </Show>
               </box>
-              <Show when={hasRightContent()}>
+              <Show when={hasRightContent() || dictation.ready}>
                 <box flexDirection="row" gap={1} alignItems="center">
+                  <Show when={dictation.ready}>
+                    <DictateButton dictation={dictation} disabled={props.disabled} />
+                  </Show>
                   {props.right}
                 </box>
               </Show>
@@ -1678,6 +1728,12 @@ export function Prompt(props: PromptProps) {
                   <text fg={theme.text}>
                     {paletteShortcut()} <span style={{ fg: theme.textMuted }}>commands</span>
                   </text>
+                  <Show when={dictation.ready && dictateShortcut()}>
+                    <text fg={theme.text} wrapMode="none">
+                      {dictateShortcut()}{" "}
+                      <span style={{ fg: theme.textMuted }}>{dictation.active ? "stop" : "dictate"}</span>
+                    </text>
+                  </Show>
                 </Match>
                 <Match when={store.mode === "shell"}>
                   <text fg={theme.text}>

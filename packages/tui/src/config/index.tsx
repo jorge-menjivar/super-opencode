@@ -50,6 +50,20 @@ export const Attention = Schema.Struct({
   sounds: Schema.optional(AttentionSounds),
 }).annotate({ description: "Attention notification and sound settings" })
 
+export const SttStopMode = Schema.Literals(["silence_only", "silence_and_manual", "manual_only"]).annotate({
+  description: "How a dictation ends: on silence, on a second keypress, or either",
+})
+export type SttStopMode = Schema.Schema.Type<typeof SttStopMode>
+export const Stt = Schema.Struct({
+  enabled: Schema.optional(Schema.Boolean).annotate({
+    description: "Enable dictation through the Super STT daemon (default: true)",
+  }),
+  language: Schema.optional(Schema.String).annotate({
+    description: "BCP-47 language tag or 'auto'. Defaults to the language configured in Super STT",
+  }),
+  stop_mode: Schema.optional(SttStopMode),
+}).annotate({ description: "Speech-to-text settings" })
+
 const PromptSize = Schema.Int.check(Schema.isGreaterThan(0))
 export const Prompt = Schema.Struct({
   max_height: Schema.optional(PromptSize).annotate({ description: "Prompt textarea max height" }),
@@ -67,6 +81,7 @@ export const Info = Schema.Struct({
   leader_timeout: Schema.optional(LeaderTimeout),
   attention: Schema.optional(Attention),
   prompt: Schema.optional(Prompt),
+  stt: Schema.optional(Stt),
   scroll_speed: Schema.optional(ScrollSpeed).annotate({ description: "TUI scroll speed" }),
   scroll_acceleration: Schema.optional(ScrollAcceleration),
   diff_style: Schema.optional(DiffStyle),
@@ -75,7 +90,12 @@ export const Info = Schema.Struct({
 })
 export type Info = Schema.Schema.Type<typeof Info>
 
-export type Resolved = Omit<Info, "attention" | "keybinds" | "leader_timeout" | "mouse" | "cursor"> & {
+export type Resolved = Omit<Info, "attention" | "keybinds" | "leader_timeout" | "mouse" | "cursor" | "stt"> & {
+  stt: {
+    enabled: boolean
+    language?: string
+    stop_mode?: SttStopMode
+  }
   attention: {
     enabled: boolean
     notifications: boolean
@@ -112,6 +132,11 @@ export function resolve(input: Info, options: ResolveOptions): Resolved {
 
   return {
     ...input,
+    stt: {
+      enabled: input.stt?.enabled ?? true,
+      language: input.stt?.language,
+      stop_mode: input.stt?.stop_mode,
+    },
     attention: {
       enabled: input.attention?.enabled ?? false,
       notifications: input.attention?.notifications ?? true,
