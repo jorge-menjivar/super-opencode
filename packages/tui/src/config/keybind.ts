@@ -192,6 +192,13 @@ export const Definitions = {
   "session.message.user.previous": keybind("none", "Navigate to previous user message"),
   "session.messages_last_user": keybind("alt+end", "Navigate to last user message"),
   "messages.copy": keybind("<leader>y", "Copy message"),
+  "session.highlight.next": keybind("ctrl+shift+j,ctrl+shift+down", "Select the next message"),
+  "session.highlight.previous": keybind("ctrl+shift+k,ctrl+shift+up", "Select the previous message"),
+  // Bare keys, reachable only while a message is selected: the prompt keeps the
+  // keyboard otherwise, and typing must stay typing.
+  "session.highlight.speak": keybind("p", "Speak the selected message"),
+  "session.highlight.expand": keybind("space", "Expand the selected message's thoughts"),
+  "session.highlight.clear": keybind("escape", "Clear the message selection"),
   "session.undo": keybind("<leader>u", "Undo message"),
   "session.redo": keybind("<leader>r", "Redo message"),
   "session.toggle.thinking": keybind("none", "Toggle thinking blocks visibility"),
@@ -204,6 +211,27 @@ export const Definitions = {
   "prompt.stash": keybind("none", "Stash prompt"),
   "prompt.stash.pop": keybind("none", "Pop stashed prompt"),
   "prompt.stash.list": keybind("none", "List stashed prompts"),
+  // ctrl+s is safe here: the TUI runs the tty in raw mode, which clears IXON,
+  // so it never reaches software flow control as XOFF.
+  "prompt.dictate": keybind("ctrl+s,<leader>d", "Start or stop dictation"),
+  // ctrl+i is Tab on a terminal without the kitty keyboard protocol, where it
+  // would take the key from agent cycling and autocomplete. The leader binding
+  // is the way in on one of those.
+  "prompt.interactive": keybind("ctrl+i,<leader>v", "Toggle interactive voice mode"),
+  // Bare keys, reachable only inside interactive mode, where the prompt takes
+  // nothing typed. Talking is one key held down: the press opens the mic and
+  // the release closes it and sends, so the two are bound separately.
+  "prompt.voice.talk": keybind("space", "Hold to talk in interactive mode"),
+  "prompt.voice.send": keybind({ key: "space", event: "release" }, "Send what was said in interactive mode"),
+  "prompt.voice.listen": keybind("v", "Switch between hold-to-talk and an open mic"),
+  "prompt.voice.escape": keybind(
+    "escape",
+    "In interactive mode: stop the voice, twice to interrupt the agent, hold to leave",
+  ),
+  "prompt.voice.escape.release": keybind(
+    { key: "escape", event: "release" },
+    "In interactive mode: escape let go, which tells a tap from a hold",
+  ),
 
   "prompt.clear": keybind("ctrl+c", "Clear input field"),
   "prompt.paste": keybind({ key: "ctrl+v", preventDefault: false }, "Paste from clipboard"),

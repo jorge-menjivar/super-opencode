@@ -44,6 +44,11 @@ export const MiniWorkSpinner = Schema.Literals([
 ])
 export type MiniWorkSpinner = Schema.Schema.Type<typeof MiniWorkSpinner>
 
+export const SttStopMode = Schema.Literals(["silence_only", "silence_and_manual", "manual_only"]).annotate({
+  description: "How a dictation ends: on silence, on a second keypress, or either",
+})
+export type SttStopMode = Schema.Schema.Type<typeof SttStopMode>
+
 export const Plugin = Schema.Union([
   Schema.String,
   Schema.Struct({
@@ -149,6 +154,27 @@ export const Info = Schema.Struct({
       }),
     }),
   ).annotate({ description: "Prompt input behavior" }),
+  stt: Schema.optional(
+    Schema.Struct({
+      enabled: Schema.optional(Schema.Boolean).annotate({
+        description: "Enable dictation through the Super STT daemon (default: true)",
+      }),
+      language: Schema.optional(Schema.String).annotate({
+        description: "BCP-47 language tag or 'auto'. Defaults to the language configured in Super STT",
+      }),
+      stop_mode: Schema.optional(SttStopMode),
+    }),
+  ).annotate({ description: "Speech-to-text settings" }),
+  tts: Schema.optional(
+    Schema.Struct({
+      enabled: Schema.optional(Schema.Boolean).annotate({
+        description: "Enable reading replies aloud through the Super TTS daemon (default: true)",
+      }),
+      // No voice, language, speed or instructions: each overrides something the
+      // user configured, so the daemon gates them behind the `settings` scope and
+      // refuses a request that names one. They belong to Super TTS's own settings.
+    }),
+  ).annotate({ description: "Text-to-speech settings" }),
   session: Schema.optional(
     Schema.Struct({
       sidebar: Schema.optional(Schema.Literals(["auto", "hide"])).annotate({
@@ -256,7 +282,10 @@ export const Info = Schema.Struct({
 })
 export type Info = Schema.Schema.Type<typeof Info>
 
-export type Resolved = Omit<Info, "attention" | "cursor" | "keybinds" | "leader" | "mouse" | "session" | "tabs"> & {
+export type Resolved = Omit<
+  Info,
+  "attention" | "cursor" | "keybinds" | "leader" | "mouse" | "session" | "stt" | "tabs" | "tts"
+> & {
   attention: {
     notifications: boolean
     sound: boolean
@@ -270,6 +299,14 @@ export type Resolved = Omit<Info, "attention" | "cursor" | "keybinds" | "leader"
   cursor: {
     style: "block" | "underline" | "line" | "default"
     blinking: boolean
+  }
+  stt: {
+    enabled: boolean
+    language?: string
+    stop_mode?: SttStopMode
+  }
+  tts: {
+    enabled: boolean
   }
   session: Omit<NonNullable<Info["session"]>, "new_location" | "permissions" | "tps"> & {
     new_location: "launch" | "inherit"
@@ -318,6 +355,14 @@ export function resolve(
     cursor: {
       style: input.cursor?.style ?? "block",
       blinking: input.cursor?.blinking ?? true,
+    },
+    stt: {
+      enabled: input.stt?.enabled ?? true,
+      language: input.stt?.language,
+      stop_mode: input.stt?.stop_mode,
+    },
+    tts: {
+      enabled: input.tts?.enabled ?? true,
     },
     session: {
       ...input.session,

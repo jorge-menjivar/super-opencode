@@ -332,6 +332,9 @@ function mount(input: {
                 config: input.config,
                 mutatePending: async () => true,
                 pendingDelivery: () => undefined,
+                highlighted: () => undefined,
+                thoughts: () => new Set(),
+                toggleThoughts: () => {},
               }}
             >
               <box paddingTop={2}>

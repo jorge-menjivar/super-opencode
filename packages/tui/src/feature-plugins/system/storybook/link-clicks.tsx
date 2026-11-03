@@ -96,6 +96,9 @@ function LinkClicksStory(props: { context: Plugin.Context }) {
           config: config.data,
           mutatePending: async () => false,
           pendingDelivery: () => undefined,
+          highlighted: () => undefined,
+          thoughts: () => new Set(),
+          toggleThoughts: () => {},
         }}
       >
         <scrollbox flexGrow={1} minHeight={0}>
