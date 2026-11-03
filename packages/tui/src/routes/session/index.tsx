@@ -23,15 +23,9 @@ import { useTuiTerminalEnvironment } from "../../context/runtime"
 import { Spinner, SPINNER_FRAMES } from "../../component/spinner"
 import { PatchDiff } from "../../component/patch-diff"
 import { useTheme, useThemes } from "../../context/theme"
-import {
-  BoxRenderable,
-  ScrollBoxRenderable,
-  addDefaultParsers,
-  TextAttributes,
-  RGBA,
-  MouseEvent,
-} from "@opentui/core"
+import { BoxRenderable, ScrollBoxRenderable, addDefaultParsers, TextAttributes, RGBA, MouseEvent } from "@opentui/core"
 import { Prompt, type PromptRef } from "../../component/prompt"
+import { PlayButton, spokenText, useSpeech } from "../../component/prompt/speak"
 import {
   mediaHashFromUri,
   type PromptAttachment,
@@ -127,8 +121,15 @@ import { isRecord } from "../../util/record"
 import { parseTodos } from "../../util/todo"
 import { createHistoryPrepend } from "./history"
 import { context, use, type PendingAction } from "./render-context"
-import { INLINE_TOOL_ICON_WIDTH, InlineToolRow, ReasoningPart, TextPart, toolDisplay } from "./message-parts"
-import { defaultVerbosity, type GroupKind, type SessionEntry } from "./grouping/session"
+import {
+  INLINE_TOOL_ICON_WIDTH,
+  InlineToolRow,
+  ReasoningPart,
+  TextPart,
+  thoughtKey,
+  toolDisplay,
+} from "./message-parts"
+import { defaultVerbosity, type GroupKind, type SessionEntry, type SessionGroup } from "./grouping/session"
 import { SessionGroupView } from "./group-view"
 import { useEntryAnchor } from "./anchor-view"
 import { containsAnchor, createTimelineAnchors, groupID } from "./anchors"
@@ -884,6 +885,53 @@ export function Session(props: {
       dialog.clear()
     })
 
+  // The message the keyboard is pointed at, if any. Holding an id rather than
+  // an index keeps it on the same message as the session grows underneath it.
+  const [highlighted, setHighlighted] = createSignal<string>()
+  const [thoughts, setThoughts] = createSignal<ReadonlySet<string>>(new Set())
+  const speech = useSpeech()
+
+  function toggleThoughts(keys: readonly string[]) {
+    if (keys.length === 0) return
+    setThoughts((open) => {
+      const next = new Set(open)
+      // One press opens everything the message was thinking; the next closes
+      // what it opened, so a message with several blocks still takes two
+      // presses rather than one per block.
+      const opening = keys.some((key) => !next.has(key))
+      for (const key of keys) {
+        if (opening) next.add(key)
+        else next.delete(key)
+      }
+      return next
+    })
+  }
+
+  // Every message the transcript draws, a prompt of your own as much as a
+  // reply: what a key then does with the selection depends on what is in it —
+  // speaking wants text, expanding wants thoughts — but what can be selected
+  // does not. A plain function rather than a memo: it walks every message, and
+  // nothing needs it until a key is pressed.
+  function selectable() {
+    return messagesBeforeRevert().filter((message) => {
+      if (message.type === "user") return Boolean(message.text.trim())
+      if (message.type !== "assistant") return false
+      return message.content.some((content) => content.type === "tool" || Boolean(content.text.trim()))
+    })
+  }
+
+  // `step` of 1 moves towards the newest message, -1 towards the oldest. The
+  // first press lands on the newest, which is the one already under the eye.
+  function moveHighlight(step: number) {
+    const list = selectable()
+    if (list.length === 0) return
+    const current = list.findIndex((message) => message.id === highlighted())
+    const target = list[current === -1 ? list.length - 1 : Math.min(list.length - 1, Math.max(0, current + step))]
+    if (!target) return
+    setHighlighted(target.id)
+    jumpToMessage(target.id)
+  }
+
   const jumpToMessage = (messageID: string) =>
     ensureAllRows(() => {
       const child = anchors.forMessage(messageID)
@@ -1051,6 +1099,20 @@ export function Session(props: {
   ]
 
   const baseCommands = createMemo(() => [
+    {
+      title: "Select next message",
+      id: "session.highlight.next",
+      group: "Session",
+      palette: undefined,
+      run: () => moveHighlight(1),
+    },
+    {
+      title: "Select previous message",
+      id: "session.highlight.previous",
+      group: "Session",
+      palette: undefined,
+      run: () => moveHighlight(-1),
+    },
     {
       title: "Rename session",
       id: "session.rename",
@@ -1278,7 +1340,9 @@ export function Session(props: {
       },
       run: () => {
         const lastAssistantMessage = messagesBeforeRevert().findLast(
-          (msg) => msg.type === "assistant" || (msg.type === "compaction" && msg.status === "completed" && msg.summary.trim() !== ""),
+          (msg) =>
+            msg.type === "assistant" ||
+            (msg.type === "compaction" && msg.status === "completed" && msg.summary.trim() !== ""),
         )
         if (!lastAssistantMessage) {
           toast.show({ message: "No assistant messages found", variant: "error" })
@@ -1432,8 +1496,50 @@ export function Session(props: {
     },
   ])
 
+  // What a selected message answers to. Registered with the rest, but bound
+  // only while one is selected: their keys are bare ones, and everywhere else
+  // they are typing.
+  const highlightCommands = [
+    {
+      title: "Speak the selected message",
+      id: "session.highlight.speak",
+      group: "Session",
+      palette: undefined,
+      run: () => {
+        const message = data.session.message.get(route.sessionID, highlighted() ?? "")
+        if (message?.type !== "assistant") return
+        // Pressing it again while this reply is the one talking is what stops
+        // it; which of the two this is, is the daemon's answer, not ours.
+        void speech.play(spokenText(message), message.id)
+      },
+    },
+    {
+      title: "Expand the selected message's thoughts",
+      id: "session.highlight.expand",
+      group: "Session",
+      palette: undefined,
+      run: () => {
+        const message = data.session.message.get(route.sessionID, highlighted() ?? "")
+        if (message?.type !== "assistant") return
+        const ordinals = { reasoning: 0 }
+        toggleThoughts(
+          message.content.flatMap((content) =>
+            content.type === "reasoning" ? [thoughtKey(message.id, `reasoning:${ordinals.reasoning++}`)] : [],
+          ),
+        )
+      },
+    },
+    {
+      title: "Clear the message selection",
+      id: "session.highlight.clear",
+      group: "Session",
+      palette: undefined,
+      run: () => setHighlighted(undefined),
+    },
+  ]
+
   const commands = createMemo(() =>
-    [...globalCommands, ...baseAndUnfocusedCommands, ...baseCommands()].map(
+    [...globalCommands, ...baseAndUnfocusedCommands, ...baseCommands(), ...highlightCommands].map(
       (command) =>
         ({
           bind: false,
@@ -1458,12 +1564,21 @@ export function Session(props: {
     bindings: [...baseAndUnfocusedCommands, ...baseCommands()].map((command) => command.id),
   }))
 
+  // A selected message owns the bare keys, above everything else in the base
+  // layers. The prompt stands down meanwhile, so none of it is typing.
+  Keymap.createLayer(() => ({
+    priority: 2,
+    enabled: highlighted() !== undefined,
+    bindings: highlightCommands.map((command) => command.id),
+  }))
+
   createEffect(
     on(
       () => route.sessionID,
       () => {
         setComposer("open", false)
         clearMessageNavigation()
+        setHighlighted(undefined)
       },
     ),
   )
@@ -1509,6 +1624,9 @@ export function Session(props: {
         config,
         mutatePending,
         pendingDelivery: (inboxID) => pendingDeliveries().get(inboxID),
+        highlighted,
+        thoughts,
+        toggleThoughts,
       }}
     >
       <box flexDirection="row" flexGrow={1} minHeight={0}>
@@ -1582,9 +1700,7 @@ export function Session(props: {
                   onMouseOut={() => setLatestHovered(false)}
                   onMouseUp={toBottom}
                 >
-                  <text
-                    fg={latestHovered() ? theme.text.action.secondary.hovered : theme.text.action.secondary.base}
-                  >
+                  <text fg={latestHovered() ? theme.text.action.secondary.hovered : theme.text.action.secondary.base}>
                     Jump to latest ↓
                   </text>
                 </box>
@@ -1630,12 +1746,7 @@ export function Session(props: {
                     }}
                   </Show>
                 </Match>
-                <Match
-                  when={
-                    session() &&
-                    currentLocation.error?.location.directory === session()!.location.directory
-                  }
-                >
+                <Match when={session() && currentLocation.error?.location.directory === session()!.location.directory}>
                   <SessionLocationMissing
                     directory={session()!.location.directory}
                     projectID={session()!.projectID}
@@ -1646,6 +1757,10 @@ export function Session(props: {
                   <Prompt
                     visible={true}
                     ref={bind}
+                    // A selected message owns the keyboard: its bare keys act on
+                    // the transcript, so the prompt takes nothing typed while one
+                    // is up.
+                    disabled={highlighted() !== undefined}
                     muted={props.promptMuted}
                     onSubmit={() => {
                       toBottom()
@@ -1673,14 +1788,39 @@ type SessionRowViewProps = {
   boundaryID?: string
 }
 
+// The messages a transcript row draws part of, so a selected message lights up
+// every row it spans.
+function rowMessages(row: SessionRow): string[] {
+  if (row.type === "group") return row.children.flatMap(nodeMessages)
+  if (row.type === "message" || row.type === "assistant-footer") return [row.messageID]
+  if (row.type === "part") return [row.ref.messageID]
+  return []
+}
+
+function nodeMessages(node: SessionGroup["children"][number]): string[] {
+  return node.type === "entry" ? rowMessages(node.entry) : node.children.flatMap(nodeMessages)
+}
+
 function SessionRowView(props: SessionRowViewProps) {
+  const ctx = use()
+  const theme = useTheme()
+  const highlighted = createMemo(() => {
+    const id = ctx.highlighted()
+    return id !== undefined && rowMessages(props.row).includes(id)
+  })
   const [target, setTarget] = createSignal<BoxRenderable>()
   useEntryAnchor({
     entry: () => (props.row.type === "group" ? undefined : props.row),
     node: target,
   })
   return (
-    <box ref={setTarget} id={sessionRowID(props.row, props.boundaryID)} marginTop={1} flexShrink={0}>
+    <box
+      ref={setTarget}
+      id={sessionRowID(props.row, props.boundaryID)}
+      marginTop={1}
+      flexShrink={0}
+      backgroundColor={highlighted() ? theme.background.raised.high : undefined}
+    >
       <Switch>
         <Match when={props.row.type === "group" ? props.row : undefined}>
           {(row) => (
@@ -1998,6 +2138,7 @@ function SessionPartView(props: {
             <ReasoningPart
               part={item() as SessionMessageAssistantReasoning}
               message={message() as SessionMessageAssistant}
+              partID={props.partRef.partID}
               last={false}
             />
           </Match>
@@ -2030,6 +2171,8 @@ function AssistantFooter(props: { message: SessionMessageAssistant }) {
   const interrupted = createMemo(() => props.message.error?.message === "Step interrupted")
   const freeLimit = createMemo(() => props.message.error?.type === "provider.free-limit")
   const limitNotice = useLimitNotice(() => props.message)
+  const speech = useSpeech()
+  const spoken = createMemo(() => spokenText(props.message))
   return (
     <>
       <Show when={props.message.error && !interrupted() && !props.message.retry}>
@@ -2047,7 +2190,11 @@ function AssistantFooter(props: { message: SessionMessageAssistant }) {
         </Switch>
       </Show>
       <AssistantRetry retry={props.message.retry} />
-      <box paddingLeft={3} marginTop={props.message.retry || (props.message.error && !interrupted()) ? 1 : 0}>
+      <box
+        flexDirection="row"
+        paddingLeft={3}
+        marginTop={props.message.retry || (props.message.error && !interrupted()) ? 1 : 0}
+      >
         <text>
           <span style={{ fg: props.message.error ? theme.text.muted : local.agent.color(props.message.agent) }}>
             {Locale.titlecase(props.message.agent)}
@@ -2064,7 +2211,15 @@ function AssistantFooter(props: { message: SessionMessageAssistant }) {
           <Show when={interrupted()}>
             <span style={{ fg: theme.text.muted }}> · interrupted</span>
           </Show>
+          {/* Nothing to play for a reply that only called tools, so the control
+              does not appear on one. */}
+          <Show when={speech.ready && spoken()}>
+            <span style={{ fg: theme.text.muted }}> · </span>
+          </Show>
         </text>
+        <Show when={speech.ready ? spoken() : undefined}>
+          {(text) => <PlayButton speech={speech} text={text()} source={props.message.id} />}
+        </Show>
       </box>
     </>
   )
@@ -2929,9 +3084,7 @@ function BlockTool(props: BlockToolProps) {
               <Show
                 when={props.spinner}
                 fallback={
-                  <text
-                    fg={permission() ? theme.text.feedback.warning.base : (props.headerColor ?? theme.text.muted)}
-                  >
+                  <text fg={permission() ? theme.text.feedback.warning.base : (props.headerColor ?? theme.text.muted)}>
                     {title()}
                   </text>
                 }
@@ -3119,11 +3272,7 @@ function ShellDisplay(props: {
           <Show
             when={isRunning()}
             fallback={
-              <text
-                fg={theme.text.base}
-                wrapMode={expanded() ? "word" : "char"}
-                maxHeight={expanded() ? undefined : 2}
-              >
+              <text fg={theme.text.base} wrapMode={expanded() ? "word" : "char"} maxHeight={expanded() ? undefined : 2}>
                 {limitedInput()}
               </text>
             }
@@ -3224,7 +3373,9 @@ function Read(props: ToolProps) {
         Read {pathFormatter.format(stringValue(props.input.path))}
         <Show when={props.input.offset !== undefined || props.input.limit !== undefined}>
           :{finiteNumber(props.input.offset) || 1}-
-          {props.input.limit ? (finiteNumber(props.input.offset) || 1) + (finiteNumber(props.input.limit) || 0) - 1 : ""}
+          {props.input.limit
+            ? (finiteNumber(props.input.offset) || 1) + (finiteNumber(props.input.limit) || 0) - 1
+            : ""}
         </Show>
       </InlineTool>
       <For each={loaded()}>

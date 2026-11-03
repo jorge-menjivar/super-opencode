@@ -35,6 +35,15 @@ export const context = createContext<{
   config: ReturnType<typeof useConfig>["data"]
   mutatePending: (action: PendingAction, inboxID: string) => Promise<boolean>
   pendingDelivery: (inboxID: string) => SessionInbox.Delivery | undefined
+  /** The message the keyboard has selected, if any. */
+  highlighted: () => string | undefined
+  /**
+   * Which reasoning blocks are open, by message and part. The session's rather
+   * than each block's, so the keyboard can open the ones belonging to the
+   * message it has selected.
+   */
+  thoughts: () => ReadonlySet<string>
+  toggleThoughts: (keys: readonly string[]) => void
 }>()
 
 export function use() {

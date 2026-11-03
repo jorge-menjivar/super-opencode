@@ -50,6 +50,9 @@ import { createFadeIn } from "../../util/signal"
 import { DialogSkill } from "../dialog-skill"
 import { useConfig, useCursorStyle } from "../../config"
 import { usePromptMove } from "./move"
+import { DictateButton, DictatePreview, usePromptDictation, VoiceMeter } from "./dictate"
+import { ListenButton, SpeakButton, spokenText, useSpeech } from "./speak"
+import { createTapHold } from "./tap-hold"
 import { promptFilesForServer, resolvePastedAttachments } from "./local-attachment"
 import { locationKey, useData } from "../../context/data"
 import { useLocation } from "../../context/location"
@@ -262,6 +265,71 @@ export function Prompt(props: PromptProps) {
     sessionID: () => props.sessionID,
   })
   const [pendingDirectory, setPendingDirectory] = createSignal<string>()
+  const speech = useSpeech()
+  // The voice reads the replies of the session in front of it, and no other.
+  createEffect(() => speech.follow(props.sessionID))
+  // The newest reply with something to say, taken from the session store so a
+  // session opened from history can be played as readily as one just written.
+  const lastReply = createMemo(() =>
+    data.session.message
+      .list(props.sessionID ?? "")
+      .findLast((message) => message.type === "assistant" && spokenText(message).length > 0),
+  )
+  const dictation = usePromptDictation({
+    monitor: () => speech.interactive,
+    // Interactive mode without the microphone is a prompt that takes nothing.
+    refused: () => {
+      if (speech.interactive) speech.toggle()
+    },
+    silence: () => speech.stop(),
+    deliver: (text) => {
+      // In interactive mode what you said is a turn, not a draft: it goes as
+      // spoken, over the top of whatever the agent was doing.
+      if (speech.interactive) {
+        void say(text)
+        return
+      }
+      // Dictation appends to whatever is already typed, so separate it from a
+      // preceding word the way a space bar would.
+      const before = input.plainText.slice(0, input.cursorOffset)
+      input.insertText(before && !/\s$/.test(before) ? " " + text : text)
+      input.focus()
+    },
+  })
+
+  /**
+   * Send something said out loud. A turn already running is interrupted first:
+   * someone who talks over the agent means the new thing, and finishing the old
+   * turn would answer a question nobody is asking any more.
+   */
+  async function say(text: string) {
+    // No session yet is not a reason to drop what was said: submitting opens
+    // one, exactly as it does for the first thing anyone types.
+    if (!text) return
+    if (props.sessionID && status() === "running") {
+      await client.api.session.interrupt({ sessionID: props.sessionID, resume: true }).catch(() => undefined)
+    }
+    input.setText(text)
+    setStore("prompt", "text", text)
+    await submit()
+  }
+  // What the meter says when no words are coming through: an open microphone is
+  // already listening, a held key is not, and either way a turn in flight means
+  // what was just said went.
+  const voiceHint = createMemo(() => {
+    const sent = status() === "running" ? "sent — " : ""
+    return speech.listen === "open" ? `${sent}the microphone is open` : `${sent}hold space to talk`
+  })
+  // Interactive mode is the two daemons and nothing else, so one that cannot be
+  // reached is said where the microphone is, for as long as it lasts.
+  const voiceWarning = createMemo(() => {
+    const deaf = !dictation.reachable
+    const mute = !speech.reachable
+    if (deaf && mute) return "can't reach Super STT or Super TTS"
+    if (deaf) return "can't reach Super STT — the microphone is unavailable"
+    if (mute) return "can't reach Super TTS — replies won't be read aloud"
+    return undefined
+  })
   Keymap.createLayer(() => ({
     mode: "global",
     enabled: !disabled(),
@@ -667,8 +735,202 @@ export function Prompt(props: PromptProps) {
       "session.interrupt",
       "session.background",
       "session.move",
+      "prompt.dictate",
+      "prompt.interactive",
     ],
   }))
+
+  // Whether the terminal has reported a key coming back up. Behind zellij none
+  // ever does, and a held key shows only by repeating.
+  let releases = false
+  // Escape tapped quiets the voice, tapped twice stops the agent too, and held
+  // leaves the mode. What decides which belongs to the mode and never outlives
+  // it.
+  const escape = createTapHold({
+    releases: () => releases,
+    // All three mean the voice stops, so it stops as the key goes down rather
+    // than once the key has said which it is.
+    down: () => speech.stop(),
+    double: () => {
+      if (!props.sessionID || status() !== "running") return
+      void client.api.session.interrupt({ sessionID: props.sessionID, resume: true }).catch(() => undefined)
+    },
+    hold: () => speech.toggle(),
+  })
+
+  Keymap.createLayer(() => ({
+    mode: "global",
+    enabled: !disabled(),
+    commands: [
+      {
+        id: "prompt.dictate",
+        title: dictation.state === "recording" ? "Stop dictation" : "Start dictation",
+        palette: true as const,
+        enabled: dictation.ready,
+        run: () => {
+          dialog.clear()
+          dictation.toggle()
+        },
+      },
+      {
+        id: "prompt.dictate.cancel",
+        title: "Cancel dictation",
+        palette: true as const,
+        enabled: dictation.active,
+        run: () => {
+          dialog.clear()
+          dictation.cancel()
+        },
+      },
+      {
+        id: "prompt.interactive",
+        title: speech.interactive ? "Leave interactive voice mode" : "Talk to the agent (interactive mode)",
+        palette: true as const,
+        // Leaving never needs the daemon: the mode is remembered across
+        // restarts, and it may come back on with the daemon gone.
+        enabled: speech.ready || speech.interactive,
+        run: () => {
+          dialog.clear()
+          speech.toggle()
+        },
+      },
+      {
+        id: "prompt.voice.talk",
+        title: "Talk",
+        run: () => {
+          if (!speech.interactive || speech.listen !== "push" || !dictation.ready) return
+          // Silencing the voice belongs to the microphone opening, wherever it
+          // opens from, so it is wired up once where the dictation is built.
+          dictation.hold()
+        },
+      },
+      {
+        id: "prompt.voice.send",
+        title: "Send what was said",
+        run: () => {
+          releases = true
+          if (!speech.interactive || speech.listen !== "push" || !dictation.ready) return
+          dictation.release()
+        },
+      },
+      {
+        id: "prompt.voice.listen",
+        title: speech.listen === "open" ? "Hold a key to talk instead" : "Leave the microphone open",
+        palette: true as const,
+        enabled: speech.interactive,
+        run: () => {
+          dialog.clear()
+          speech.cycleListening()
+        },
+      },
+      {
+        id: "prompt.voice.escape",
+        title: "Stop the voice (twice: interrupt the agent, hold: leave the mode)",
+        enabled: speech.interactive,
+        // Every press, repeats included: the repeats are how a hold shows where
+        // no release will ever say otherwise.
+        run: () => escape.press(),
+      },
+      {
+        id: "prompt.voice.escape.release",
+        title: "Escape let go",
+        enabled: speech.interactive,
+        run: () => {
+          releases = true
+          escape.release()
+        },
+      },
+      {
+        id: "prompt.speak.replay",
+        title: "Speak the last reply again",
+        palette: true as const,
+        enabled: speech.ready && Boolean(lastReply()),
+        run: () => {
+          dialog.clear()
+          const reply = lastReply()
+          if (reply?.type === "assistant") void speech.play(spokenText(reply), reply.id)
+        },
+      },
+      {
+        id: "prompt.speak.test",
+        title: "Speak a test phrase",
+        palette: true as const,
+        enabled: speech.ready,
+        run: () => {
+          dialog.clear()
+          void speech.test()
+        },
+      },
+      {
+        id: "prompt.speak.stop",
+        title: "Stop speaking",
+        palette: true as const,
+        enabled: speech.speaking,
+        run: () => {
+          dialog.clear()
+          speech.stop()
+        },
+      },
+    ].map((command) => ({ group: "Prompt", bind: false, ...command }) satisfies KeymapCommand),
+  }))
+
+  // While interactive mode is on the bare keys below belong to the
+  // conversation, and the prompt takes nothing typed — which is what frees them
+  // up. Above the base layers rather than a mode of its own: a mode would take
+  // the whole keyboard, and quitting, the command palette and everything else
+  // are to stay exactly where they were.
+  Keymap.createLayer(() => ({
+    priority: 2,
+    enabled: speech.interactive && !disabled(),
+    bindings: [
+      "prompt.voice.talk",
+      "prompt.voice.send",
+      "prompt.voice.listen",
+      "prompt.voice.escape",
+      "prompt.voice.escape.release",
+    ],
+  }))
+
+  createEffect(() => {
+    if (!speech.interactive) return
+    onCleanup(() => {
+      escape.cancel()
+      // Leaving ends the conversation, both halves of it: the voice stops
+      // mid-sentence and a capture in flight is dropped rather than sent.
+      // A remount is not leaving, so make sure the mode is really off.
+      if (speech.interactive) return
+      speech.stop()
+      dictation.cancel()
+    })
+  })
+
+  // Both permissions as the mode comes on — including on a restart that finds it
+  // on — and one dialog at a time: the voice's, then the microphone's. A refusal
+  // of either leaves the mode, which ends this.
+  const [prepared, setPrepared] = createSignal(false)
+  createEffect(() => {
+    if (!speech.interactive) return
+    let live = true
+    void (async () => {
+      await speech.prepare()
+      if (!live) return
+      await dictation.prepare()
+      if (live) setPrepared(true)
+    })()
+    onCleanup(() => {
+      live = false
+      setPrepared(false)
+    })
+  })
+
+  // An open microphone is the mode's, not a key's: it runs for as long as the
+  // mode is in that state, and closing it drops whatever was half-said rather
+  // than sending it. It waits for the dialogs above rather than asking over them.
+  createEffect(() => {
+    if (!speech.interactive || !prepared() || !dictation.ready || speech.listen !== "open") return
+    dictation.begin({ open: true })
+    onCleanup(() => dictation.cancel())
+  })
 
   const ref: PromptRef = {
     get focused() {
@@ -1766,93 +2028,108 @@ export function Prompt(props: PromptProps) {
                 </Show>
               </box>
             </Show>
-            <textarea
-              width="100%"
-              placeholder={placeholderText()}
-              placeholderColor={theme.text.muted}
-              textColor={muted() ? theme.text.muted : theme.text.base}
-              focusedTextColor={muted() ? theme.text.muted : theme.text.base}
-              minHeight={1}
-              maxHeight={maxHeight()}
-              cursorStyle={cursorStyle()}
-              onContentChange={() => {
-                const value = input.plainText
-                setStore("prompt", "text", value)
-                auto()?.onInput(value)
-                syncExtmarksWithPromptParts()
-                setCursorVersion((value) => value + 1)
-              }}
-              onCursorChange={() => setCursorVersion((value) => value + 1)}
-              onKeyDown={(e: { preventDefault(): void }) => {
-                if (disabled()) {
-                  e.preventDefault()
-                  return
-                }
-              }}
-              onSubmit={() => {
-                if (disabled()) return
-                // IME: double-defer so the last composed character (e.g. Korean
-                // hangul) is flushed to plainText before we read it for submission.
-                setTimeout(() => setTimeout(() => submit(), 0), 0)
-              }}
-              onPaste={(event: PasteEvent) => {
-                if (disabled()) {
+            <box width="100%" visible={!speech.interactive}>
+              <textarea
+                width="100%"
+                placeholder={placeholderText()}
+                placeholderColor={theme.text.muted}
+                textColor={muted() ? theme.text.muted : theme.text.base}
+                focusedTextColor={muted() ? theme.text.muted : theme.text.base}
+                minHeight={1}
+                maxHeight={maxHeight()}
+                cursorStyle={cursorStyle()}
+                onContentChange={() => {
+                  const value = input.plainText
+                  setStore("prompt", "text", value)
+                  auto()?.onInput(value)
+                  syncExtmarksWithPromptParts()
+                  setCursorVersion((value) => value + 1)
+                }}
+                onCursorChange={() => setCursorVersion((value) => value + 1)}
+                onKeyDown={(e: { preventDefault(): void }) => {
+                  // Interactive mode is a conversation: the keys are the
+                  // microphone's, and nothing typed lands here.
+                  if (disabled() || speech.interactive) {
+                    e.preventDefault()
+                    return
+                  }
+                }}
+                onSubmit={() => {
+                  if (disabled()) return
+                  // IME: double-defer so the last composed character (e.g. Korean
+                  // hangul) is flushed to plainText before we read it for submission.
+                  setTimeout(() => setTimeout(() => submit(), 0), 0)
+                }}
+                onPaste={(event: PasteEvent) => {
+                  if (disabled() || speech.interactive) {
+                    event.preventDefault()
+                    return
+                  }
+
+                  // Normalize line endings at the boundary
+                  // Windows ConPTY/Terminal often sends CR-only newlines in bracketed paste
+                  // Replace CRLF first, then any remaining CR
+                  const normalizedText = decodePasteBytes(event.bytes).replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+
+                  // Windows Terminal <1.25 can surface image-only clipboard as an
+                  // empty bracketed paste. Windows Terminal 1.25+ does not.
+                  if (event.bytes.byteLength === 0) {
+                    keymap.dispatch("prompt.paste")
+                    return
+                  }
+
+                  // Once we cross an async boundary below, the terminal may perform its
+                  // default paste unless we suppress it first and handle insertion ourselves.
                   event.preventDefault()
-                  return
-                }
 
-                // Normalize line endings at the boundary
-                // Windows ConPTY/Terminal often sends CR-only newlines in bracketed paste
-                // Replace CRLF first, then any remaining CR
-                const normalizedText = decodePasteBytes(event.bytes).replace(/\r\n/g, "\n").replace(/\r/g, "\n")
-
-                // Windows Terminal <1.25 can surface image-only clipboard as an
-                // empty bracketed paste. Windows Terminal 1.25+ does not.
-                if (event.bytes.byteLength === 0) {
-                  keymap.dispatch("prompt.paste")
-                  return
-                }
-
-                // Once we cross an async boundary below, the terminal may perform its
-                // default paste unless we suppress it first and handle insertion ourselves.
-                event.preventDefault()
-
-                void enqueuePaste((changed) => pasteInputText(normalizedText, changed))
-              }}
-              ref={(r: TextareaRenderable) => {
-                input = r
-                Object.assign(r, {
-                  getClipboardText: (text: string) => expandPastedTextPlaceholders(text, store.prompt.pasted),
-                })
-                setInputTarget(r)
-                if (promptPartTypeId === 0) {
-                  promptPartTypeId = input.extmarks.registerType("prompt-part")
-                }
-                props.ref?.(ref)
-                setTimeout(() => {
-                  // setTimeout is a workaround and needs to be addressed properly
-                  if (!input || input.isDestroyed) return
-                  input.cursorColor = disabled() ? theme.background.raised.base : theme.text.base
-                }, 0)
-              }}
-              onMouseDown={(r: MouseEvent) => {
-                if (disabled()) {
+                  void enqueuePaste((changed) => pasteInputText(normalizedText, changed))
+                }}
+                ref={(r: TextareaRenderable) => {
+                  input = r
+                  Object.assign(r, {
+                    getClipboardText: (text: string) => expandPastedTextPlaceholders(text, store.prompt.pasted),
+                  })
+                  setInputTarget(r)
+                  if (promptPartTypeId === 0) {
+                    promptPartTypeId = input.extmarks.registerType("prompt-part")
+                  }
+                  props.ref?.(ref)
+                  setTimeout(() => {
+                    // setTimeout is a workaround and needs to be addressed properly
+                    if (!input || input.isDestroyed) return
+                    input.cursorColor = disabled() ? theme.background.raised.base : theme.text.base
+                  }, 0)
+                }}
+                onMouseDown={(r: MouseEvent) => {
+                  if (disabled()) {
+                    r.preventDefault()
+                    return
+                  }
+                  if (r.button !== 0) return
+                  r.target?.focus()
+                  const extmark = input.extmarks
+                    .getAtOffset(input.cursorOffset)
+                    .find((item) => store.extmarkToPart.get(item.id)?.type === "pasted")
+                  if (!extmark || !expandPastedText(extmark.id)) return
                   r.preventDefault()
-                  return
-                }
-                if (r.button !== 0) return
-                r.target?.focus()
-                const extmark = input.extmarks
-                  .getAtOffset(input.cursorOffset)
-                  .find((item) => store.extmarkToPart.get(item.id)?.type === "pasted")
-                if (!extmark || !expandPastedText(extmark.id)) return
-                r.preventDefault()
-                r.stopPropagation()
-              }}
-              focusedBackgroundColor="transparent"
-              cursorColor={disabled() ? theme.background.raised.base : theme.text.base}
-              syntaxStyle={syntax()}
-            />
+                  r.stopPropagation()
+                }}
+                focusedBackgroundColor="transparent"
+                cursorColor={disabled() ? theme.background.raised.base : theme.text.base}
+                // Hidden, the textarea stops drawing and so stops placing the
+                // terminal's cursor, which stays where it was last put — on the
+                // row the meter takes over. Focus stays: the mode's keys answer
+                // to it.
+                showCursor={!speech.interactive}
+                syntaxStyle={syntax()}
+              />
+            </box>
+            <Show when={speech.interactive}>
+              <VoiceMeter dictation={dictation} hint={voiceHint()} warning={voiceWarning()} />
+            </Show>
+            <Show when={dictation.ready && !speech.interactive}>
+              <DictatePreview dictation={dictation} />
+            </Show>
             <box flexDirection="row" flexShrink={0} paddingTop={1} gap={1} justifyContent="space-between">
               <PromptMetadataRow
                 mode={store.mode}
@@ -1868,6 +2145,23 @@ export function Prompt(props: PromptProps) {
                 modelAlpha={modelMetaAlpha()}
                 variantAlpha={variantMetaAlpha()}
               />
+              <Show when={dictation.ready || speech.ready || speech.interactive}>
+                <box flexDirection="row" gap={1} alignItems="center" flexShrink={0}>
+                  <Show when={speech.ready || speech.interactive}>
+                    <SpeakButton
+                      speech={speech}
+                      disabled={disabled()}
+                      listening={speech.interactive && dictation.state === "recording"}
+                    />
+                  </Show>
+                  <Show when={speech.interactive}>
+                    <ListenButton speech={speech} disabled={disabled()} />
+                  </Show>
+                  <Show when={dictation.ready && !speech.interactive}>
+                    <DictateButton dictation={dictation} disabled={disabled()} />
+                  </Show>
+                </box>
+              </Show>
             </box>
           </box>
         </box>
@@ -1967,7 +2261,41 @@ export function Prompt(props: PromptProps) {
               </box>
             </Slot>
             <Slot path="prompt.footer.file" input={footerInput()}>
-              <Show when={editorContextLabelState() !== "none" ? editorFileLabelDisplay() : undefined}>
+              {/* Interactive mode has no typing to give context to, and its keys
+                  are bare ones nothing else in opencode uses: say what they do. */}
+              <Show when={speech.interactive}>
+                <box flexDirection="row" gap={2} flexShrink={0}>
+                  <Show when={speech.listen === "push"}>
+                    <text fg={theme.text.base} wrapMode="none">
+                      space <span style={{ fg: theme.text.muted }}>talk</span>
+                    </text>
+                  </Show>
+                  <text fg={theme.text.base} wrapMode="none">
+                    v{" "}
+                    <span style={{ fg: theme.text.muted }}>
+                      {speech.listen === "open" ? "push to talk" : "open mic"}
+                    </span>
+                  </text>
+                  <Show when={speech.speaking}>
+                    <text fg={theme.text.base} wrapMode="none">
+                      esc <span style={{ fg: theme.text.muted }}>quiet</span>
+                    </text>
+                  </Show>
+                  <Show when={status() === "running"}>
+                    <text fg={theme.text.base} wrapMode="none">
+                      esc esc <span style={{ fg: theme.text.muted }}>interrupt</span>
+                    </text>
+                  </Show>
+                  <text fg={theme.text.base} wrapMode="none">
+                    hold esc <span style={{ fg: theme.text.muted }}>leave</span>
+                  </text>
+                </box>
+              </Show>
+              <Show
+                when={
+                  !speech.interactive && editorContextLabelState() !== "none" ? editorFileLabelDisplay() : undefined
+                }
+              >
                 {(file) => (
                   <text
                     wrapMode="none"

@@ -105,6 +105,8 @@ import { COMMAND_PALETTE_COMMAND, Keymap, type KeymapCommand } from "./context/k
 
 import { DialogVariant } from "./component/dialog-variant"
 import { destroyRenderer, setTerminalTitle } from "./util/renderer"
+import { hushVoice, SpeechProvider } from "./component/prompt/speak"
+import { hushMicrophone } from "./component/prompt/dictate"
 import { cliErrorMessage, errorFormat } from "./util/error"
 import { AttentionProvider } from "./context/attention"
 import { StorageProvider, useStorage } from "./context/storage"
@@ -113,6 +115,9 @@ import { ClientMcp } from "./context/client-mcp"
 import { PanelProvider, usePanel } from "./context/panel"
 import { SessionFrame } from "./component/session-frame"
 import { createTuiClipboard } from "./clipboard"
+
+// How long quitting waits for the voice daemon to acknowledge a stop.
+const VOICE_SHUTDOWN_MS = 300
 
 const appGlobalBindingCommands = ["session.list", "session.new", "open.menu"] as const
 
@@ -254,7 +259,11 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
         targetFps: 60,
         gatherStats: false,
         exitOnCtrlC: false,
-        useKittyKeyboard: {},
+        // `events` adds press/repeat/release reporting, which interactive mode's
+        // hold-to-talk needs. A release arrives on its own channel
+        // (`keyrelease`), so nothing that listens for a keypress — the prompt's
+        // textarea included — sees one.
+        useKittyKeyboard: { events: true },
         autoFocus: false,
         openConsoleOnError: false,
         useMouse: config.mouse,
@@ -324,7 +333,21 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                 exit={(reason) => {
                   if (renderer.isDestroyed) return
                   exit.reason = reason
-                  destroyRenderer(renderer)
+                  // The voice and the microphone belong to a daemon that outlives
+                  // us: audio already queued plays on, and an open capture keeps
+                  // recording, long after this process is gone. Ask them to stop
+                  // and give them a moment to answer — but never let a daemon
+                  // that has stopped listening hold the application open.
+                  // Nothing speaking and nothing recording is the ordinary case,
+                  // and it leaves immediately, exactly as it always has.
+                  const stopping = [hushVoice(), hushMicrophone()].filter((pending) => pending !== undefined)
+                  if (stopping.length === 0) {
+                    destroyRenderer(renderer)
+                    return
+                  }
+                  void Promise.race([Promise.all(stopping), Bun.sleep(VOICE_SHUTDOWN_MS)]).finally(() =>
+                    destroyRenderer(renderer),
+                  )
                 }}
               >
                 <EpilogueProvider
@@ -432,12 +455,14 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                                                             updater={input.updater}
                                                                           >
                                                                             <PanelProvider>
-                                                                              <PluginProvider
-                                                                                packages={input.packages}
-                                                                                directories={pluginDirectories}
-                                                                              >
-                                                                                <App />
-                                                                              </PluginProvider>
+                                                                              <SpeechProvider>
+                                                                                <PluginProvider
+                                                                                  packages={input.packages}
+                                                                                  directories={pluginDirectories}
+                                                                                >
+                                                                                  <App />
+                                                                                </PluginProvider>
+                                                                              </SpeechProvider>
                                                                             </PanelProvider>
                                                                           </UpdateNotificationProvider>
                                                                         </AttentionProvider>

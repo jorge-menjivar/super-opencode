@@ -1,4 +1,4 @@
-import { createMemo, createSignal, Match, Show, Switch } from "solid-js"
+import { createMemo, Match, Show, Switch } from "solid-js"
 import { RGBA, TextAttributes, type MouseEvent } from "@opentui/core"
 import { useRenderer, type JSX } from "@opentui/solid"
 import type {
@@ -44,6 +44,8 @@ export function ReasoningPart(props: {
   last: boolean
   part: SessionMessageAssistantReasoning
   message: SessionMessageAssistant
+  /** The part's place in the message, which is what keeps it open across renders. */
+  partID?: string
 }) {
   const theme = useTheme()
   const { currentSyntax: syntax } = useThemes()
@@ -53,8 +55,10 @@ export function ReasoningPart(props: {
   )
   const ctx = use()
   // Collapsed by default in hide mode: a single line throughout, so the
-  // layout never shifts. Click to open the full markdown block, click to close.
-  const [expanded, setExpanded] = createSignal(false)
+  // layout never shifts. Click to open the full markdown block, click to close
+  // — or open it from the keyboard, which is why the state is the session's.
+  const key = () => thoughtKey(props.message.id, props.partID ?? "")
+  const expanded = createMemo(() => ctx.thoughts().has(key()))
 
   const content = createMemo(() => reasoningContent(props.part))
   const isDone = createMemo(
@@ -69,7 +73,7 @@ export function ReasoningPart(props: {
   const summary = createMemo(() => reasoningSummary(content()))
   const toggle = () => {
     if (!inMinimal()) return
-    setExpanded((prev) => !prev)
+    ctx.toggleThoughts([key()])
   }
 
   return (
@@ -114,6 +118,11 @@ export function ReasoningPart(props: {
       </box>
     </Show>
   )
+}
+
+/** How the session names a reasoning block when remembering whether it is open. */
+export function thoughtKey(messageID: string, partID: string) {
+  return `${messageID}/${partID}`
 }
 
 export function reasoningContent(part: SessionMessageAssistantReasoning) {
@@ -192,7 +201,10 @@ export function TextPart(props: {
           tableOptions={{ style: "grid", cellPaddingX: 1 }}
           conceal={ctx.markdownMode() === "rendered"}
           fg={theme.markdown.text}
-          bg={theme.background.base}
+          // Painted behind every character, so it has to be the reply's own
+          // background: left as the transcript's, a selected reply shows its
+          // text on dark bands.
+          bg={ctx.highlighted() === props.message.id ? theme.background.raised.high : theme.background.base}
         />
       </box>
     </Show>
